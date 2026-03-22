@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment files — NEVER ship secrets
+.env
+.env.*
+
+# Development/test scripts
+test_*.py
+tmp/
+
+# macOS
+.DS_Store
+
+# Editor files
+.vscode/
+.idea/
+
+# HuggingFace model cache (models are pre-baked in Dockerfile instead)
+.cache/
+
+# Git
+.git/
+.gitignore
