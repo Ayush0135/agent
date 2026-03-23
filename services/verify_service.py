@@ -7,8 +7,8 @@ load_dotenv()
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 
 # Same model: cross-encoder/nli-MiniLM2-L6-H768 for NLI logic
-# Using Inference API removes the local RAM usage entirely
-API_URL = "https://api-inference.huggingface.co/models/cross-encoder/nli-MiniLM2-L6-H768"
+# Using the new HF Router URL to avoid redirection issues
+API_URL = "https://router.huggingface.co/hf-inference/models/cross-encoder/nli-MiniLM2-L6-H768"
 
 async def verify_sources(search_results: list[dict], query: str) -> list[dict]:
     """

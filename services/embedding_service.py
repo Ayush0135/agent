@@ -8,7 +8,8 @@ HF_API_KEY = os.getenv("HF_API_KEY", "")
 
 # We switch to Inference API to save RAM on Render Free Tier (512MB)
 # Endpoint for the same model: all-MiniLM-L6-v2
-API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+# Using the new HF Router URL to avoid redirection issues
+API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
 
 async def generate_embedding(text: str) -> list[float]:
     """ Generate embedding representation via HF Inference API """
