@@ -51,8 +51,29 @@ async def recall_similar_research(query: str, user_id: str, threshold: float = 0
 
         return memories
 
+        return memories
+
     except Exception as e:
         print(f"⚠️ Memory recall failed (non-critical): {e}")
+        return []
+
+async def recall_knowledge_chunks(query: str, threshold: float = 0.75, limit: int = 8) -> list[dict]:
+    """
+    Experimental: Searches for specific granular document chunks (facts) 
+    instead of just report summaries. Provides higher fidelity context.
+    """
+    try:
+        query_emb = await generate_embedding(query)
+        def _query():
+            sb = get_supabase_client()
+            return sb.rpc("match_document_chunks", {
+                "query_embedding": query_emb,
+                "match_threshold": threshold,
+                "match_count": limit
+            }).execute().data or []
+        return await asyncio.to_thread(_query)
+    except Exception as e:
+        print(f"⚠️ Chunk recall failed: {e}")
         return []
 
 
@@ -90,7 +111,7 @@ async def memorize_research(
 
         def _insert():
             sb = get_supabase_client()
-            sb.table("research_memory").insert({
+            response = sb.table("research_memory").insert({
                 "user_id": user_id,
                 "query": query,
                 "format": format_type,
@@ -100,6 +121,23 @@ async def memorize_research(
                 "sources": sources_meta,
                 "quality_score": quality_score,
             }).execute()
+            
+            if response.data and ranked_sources:
+                mem_id = response.data[0]["id"]
+                # Save top 5 chunks into the granular memory
+                chunk_payloads = []
+                for s in ranked_sources[:5]:
+                    chunk_payloads.append({
+                        "query_text": query,
+                        "url": s.get("url", ""),
+                        "content_chunk": s.get("text", "")[:3000],
+                        "embedding": s.get("embedding", query_emb), # Fallback if not Ranked
+                        "similarity_score": s.get("similarity", 0.0),
+                        "memory_id": mem_id,
+                        "user_id": user_id
+                    })
+                if chunk_payloads:
+                    sb.table("document_chunks").insert(chunk_payloads).execute()
 
         await asyncio.to_thread(_insert)
         print(f"✅ Memorized research: '{query[:50]}...' (quality={quality_score:.2f})")

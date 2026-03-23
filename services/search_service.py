@@ -9,26 +9,57 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 SEARCH_ENGINE_ID = os.getenv("SEARCH_ENGINE_ID", "")
 
 async def _scrape_url(client: httpx.AsyncClient, link: str, title: str, snippet: str) -> dict:
-    """Scrape a URL for content, falling back to snippet if scraping fails."""
+    """Scrape a URL for content, extracting paragraphs and headings for richer context."""
     try:
-        page_resp = await client.get(link, timeout=5.0, follow_redirects=True)
+        page_resp = await client.get(link, timeout=6.0, follow_redirects=True,
+                                     headers={"User-Agent": "Mozilla/5.0 (Research Bot)"})
         soup = BeautifulSoup(page_resp.text, "html.parser")
-        text_blocks = [p.text.strip() for p in soup.find_all('p') if p.text.strip()]
-        text = ' '.join(text_blocks)
+        # Extract headings for structure
+        headings = [h.get_text(strip=True) for h in soup.find_all(['h1','h2','h3']) if h.get_text(strip=True)]
+        # Extract paragraphs
+        paragraphs = [p.get_text(strip=True) for p in soup.find_all('p') if len(p.get_text(strip=True)) > 40]
+        # Extract list items for bullet-heavy pages
+        list_items = [li.get_text(strip=True) for li in soup.find_all('li') if len(li.get_text(strip=True)) > 20]
+
+        heading_text = ' | '.join(headings[:8])
+        body_text = ' '.join(paragraphs + list_items)
+        combined = f"[Headings: {heading_text}]\n{body_text}" if heading_text else body_text
+        
+        # Extract images from <img> tags
+        import urllib.parse
+        scraped_images = []
+        for img in soup.find_all('img'):
+            src = img.get('src')
+            if not src: continue
+            
+            # Convert relative to absolute
+            abs_url = urllib.parse.urljoin(link, src)
+            
+            # Simple metadata extraction
+            alt = img.get('alt', '').strip()
+            # If alt is empty, try to get nearby sibling text or skip
+            if not alt:
+                continue
+                
+            # Filter obvious small icons/trackers (just heuristic check)
+            if 'icon' in src.lower() or 'logo' in src.lower() or 'pixel' in src.lower():
+                continue
+                
+            scraped_images.append({
+                "url": abs_url,
+                "title": alt or title
+            })
+            
         return {
             "url": link,
             "title": title,
             "snippet": snippet,
-            "content": text[:5000]
+            "content": combined[:8000],   # 8k chars per source for richer context
+            "scraped_images": scraped_images[:3] # Keep top 3 images from this page
         }
     except Exception as scrape_err:
-        print(f"Scrape failed for {link}, using snippet fallback: {scrape_err}")
-        return {
-            "url": link,
-            "title": title,
-            "snippet": snippet,
-            "content": snippet  # graceful fallback to snippet
-        }
+        print(f"Scrape failed for {link}: {scrape_err}")
+        return {"url": link, "title": title, "snippet": snippet, "content": snippet}
 
 async def _search_duckduckgo(query: str, num_results: int) -> list[dict]:
     """
@@ -70,7 +101,7 @@ async def _search_duckduckgo(query: str, num_results: int) -> list[dict]:
 
     return results
 
-async def search_google(query: str, num_results: int = 5) -> list[dict]:
+async def search_google(query: str, num_results: int = 10) -> list[dict]:
     """
     Primary: Google Custom Search with full page scraping.
     Fallback 1: DuckDuckGo Instant Answers (no API key required).
@@ -131,3 +162,44 @@ async def search_google(query: str, num_results: int = 5) -> list[dict]:
         }]
 
     return results
+
+async def fetch_images(query: str, num_results: int = 5) -> list[dict]:
+    """
+    Search for relevant images using Google Custom Search API.
+    Returns: list of {"url": image_url, "title": image_title}
+    """
+    if not GOOGLE_API_KEY or not SEARCH_ENGINE_ID:
+        return []
+
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx": SEARCH_ENGINE_ID,
+        "q": query,
+        "searchType": "image",
+        "num": num_results,
+        "safe": "active"
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=6.0)
+            if response.status_code != 200:
+                print(f"Image search API returned {response.status_code}")
+                return []
+            
+            data = response.json()
+            items = data.get("items", [])
+            return [
+                {
+                    "url": item.get("link"),
+                    "title": item.get("title", "")
+                }
+                for item in items if item.get("link")
+            ]
+    except Exception as e:
+        print(f"Image search failed: {e}")
+        return []
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 4)

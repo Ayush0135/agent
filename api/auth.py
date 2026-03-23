@@ -23,14 +23,15 @@ class AuthResponse(BaseModel):
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
-@router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(payload: SignUpRequest):
     """
     Create a new account. Returns a JWT access_token on success.
-    The user_id is their unique Supabase UUID — used as the Redis key for credits.
+    If Supabase email confirmation is ON, auto-attempts login right after signup.
     """
     try:
         sb = get_supabase_client()
+
         def _signup():
             return sb.auth.sign_up({
                 "email": payload.email,
@@ -41,18 +42,50 @@ async def signup(payload: SignUpRequest):
         if not response.user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Sign-up failed. Check email/password requirements."
+                detail="Sign-up failed. Check your email and password (min 6 chars)."
             )
 
-        # Initialize their free credits in Redis immediately on signup
-        from services.payment_service import initialize_user_if_needed
-        await initialize_user_if_needed(response.user.id)
+        user_id = response.user.id
 
-        return AuthResponse(
-            access_token=response.session.access_token,
-            user_id=response.user.id,
-            email=response.user.email
+        # Initialize free credits in Redis immediately
+        from services.payment_service import initialize_user_if_needed
+        await initialize_user_if_needed(user_id)
+
+        # Case 1: Email confirmation disabled — session returned instantly
+        if response.session and response.session.access_token:
+            return {
+                "access_token": response.session.access_token,
+                "token_type": "bearer",
+                "user_id": user_id,
+                "email": response.user.email
+            }
+
+        # Case 2: Email confirmation enabled — session is None.
+        # Try immediate sign-in (works if the email was already confirmed before,
+        # or if the user signed up without confirmation flow).
+        try:
+            def _login():
+                return sb.auth.sign_in_with_password({
+                    "email": payload.email,
+                    "password": payload.password
+                })
+            login_resp = await asyncio.to_thread(_login)
+            if login_resp.session and login_resp.session.access_token:
+                return {
+                    "access_token": login_resp.session.access_token,
+                    "token_type": "bearer",
+                    "user_id": user_id,
+                    "email": response.user.email
+                }
+        except Exception:
+            pass
+
+        # Case 3: Email confirmation required — tell user to check email
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account created! Please check your email and click the confirmation link, then sign in."
         )
+
     except HTTPException:
         raise
     except Exception as e:

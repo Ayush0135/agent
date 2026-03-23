@@ -48,6 +48,7 @@ async def get_ws_user(websocket: WebSocket) -> dict | None:
                 "id": response.user.id,
                 "email": response.user.email,
             }
-    except Exception:
+    except Exception as e:
+        print(f"❌ WS Auth failed: {str(e)}")
         pass
     return None

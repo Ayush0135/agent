@@ -3,13 +3,14 @@ import asyncio
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 
 from orchestrator.pipeline import execute_pipeline
-from services.payment_service import upgrade_user_plan, get_payment_qr
+from services.payment_service import upgrade_user_plan, get_payment_qr, create_payment_order, verify_payment_by_order
 from api.auth import router as auth_router
 from api.deps import get_current_user, get_ws_user
 from db.sqlite_client import get_history, delete_history_item
@@ -31,6 +32,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Serve static frontend
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
@@ -64,6 +66,11 @@ class WebhookPayload(BaseModel):
     amount_paid: float
 
 # ── Routes ───────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health_check():
+    """Health check for deployment services."""
+    return {"status": "ok", "service": "Automated Research Agent"}
 
 @app.get("/")
 async def serve_ui():
@@ -125,20 +132,64 @@ async def generate_qr(
     amount: float = 99.0,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    🔒 Protected. Get the UPI QR code for upgrading your plan.
-    Valid amounts: 49.0 (Student) or 99.0 (Researcher).
-    """
+    """🔒 Legacy QR endpoint — use /payment/create-order instead."""
     plan_name = "Researcher Plan" if amount >= 99.0 else "Student Plan"
     return await get_payment_qr(amount, transaction_note=plan_name)
 
+
+class CreateOrderRequest(BaseModel):
+    plan: str  # 'student' | 'researcher'
+
+@app.post("/payment/create-order")
+async def create_order(
+    payload: CreateOrderRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    🔒 Step 1 of payment flow.
+    Creates a unique Order ID, stores a pending payment record in Supabase,
+    and returns a QR code with the Order ID embedded in the UPI note.
+    The QR expires in 1 hour.
+    """
+    result = await create_payment_order(
+        user_id = current_user["id"],
+        email   = current_user["email"],
+        plan    = payload.plan.lower(),
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to create order."))
+    return result
+
+
+class VerifyPaymentRequest(BaseModel):
+    order_id:  str  # Order ID from the QR code (e.g. RA-X7K9-49)
+    utr_last4: str  # Last 4 digits of the UPI Transaction Reference
+
+@app.post("/payment/verify")
+async def verify_payment(
+    payload: VerifyPaymentRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    🔒 Step 2 of payment flow.
+    Verifies the Order ID + last-4 UTR digits:
+    - order_id must exist, belong to this user, be pending, and not expired
+    - utr_last4 must be exactly 4 numeric digits
+    - On success: marks order approved, activates plan + credits in Redis
+    """
+    result = await verify_payment_by_order(
+        user_id   = current_user["id"],
+        order_id  = payload.order_id.strip().upper(),
+        utr_last4 = payload.utr_last4.strip(),
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return result
+
+
 @app.post("/webhook/payment")
 async def payment_webhook(payload: WebhookPayload):
-    """
-    Payment confirmation webhook. Called by your payment handler on success.
-    - ₹49 → Student Plan (50 credits)
-    - ₹99 → Researcher Plan (120 credits)
-    """
+    """Legacy webhook — kept for compatibility."""
     if payload.transaction_status.lower() == "success":
         if payload.amount_paid >= 99.0:
             await upgrade_user_plan(payload.user_id, "researcher", 120)
@@ -146,24 +197,33 @@ async def payment_webhook(payload: WebhookPayload):
         elif payload.amount_paid >= 49.0:
             await upgrade_user_plan(payload.user_id, "student", 50)
             return {"status": "success", "message": "Upgraded to Student. 50 credits added."}
-
     return {"status": "failed", "message": "Transaction invalid or failed"}
 
 @app.websocket("/ws/research")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    🔒 Protected WebSocket. Connect with: ws://host/ws/research?token=<jwt>
-    Send JSON: {"query": "...", "format": "detailed report"}
-    The user_id is extracted securely from the verified JWT — never trusted from client.
-    """
-    # Step 1: Authenticate via query param token
-    user = await get_ws_user(websocket)
-    if not user:
-        await websocket.close(code=4001, reason="Unauthorized: missing or invalid token.")
-        return
-
+    # Step 0: Always accept first so we can communicate errors over the socket
     await manager.connect(websocket)
-    user_id = user["id"]
+
+    # Step 1: Authenticate via query param token
+    try:
+        user = await get_ws_user(websocket)
+        if not user:
+            # Send explicit error before closing
+            await manager.send_personal_message(
+                json.dumps({"status": "⚠️ Session expired. Please sign in again.", "stage": "error", "result": "Unauthorized"}),
+                websocket
+            )
+            await websocket.close(code=4001)
+            manager.disconnect(websocket)
+            return
+        
+        user_id = user["id"]
+        print(f"✅ WS Client connected: {user['email']}")
+    except Exception as e:
+        print(f"❌ WS Handshake logic failed: {e}")
+        await websocket.close(code=1011) # Internal error
+        manager.disconnect(websocket)
+        return
 
     try:
         while True:
