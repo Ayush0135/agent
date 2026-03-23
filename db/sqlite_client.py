@@ -1,68 +1,57 @@
-import sqlite3
 import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
+from db.supabase_client import get_supabase_client
 
-DB_PATH = Path(__file__).parent.parent / "local_research.db"
-
-def _get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def _init_db():
-    """Create tables if they don't exist."""
-    with _get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS research_history (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     TEXT NOT NULL,
-                query       TEXT NOT NULL,
-                format      TEXT NOT NULL DEFAULT 'detailed report',
-                result      TEXT,
-                download_url TEXT,
-                created_at  TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-
-# Initialize on import
-_init_db()
+# This module now uses Supabase instead of a local SQLite file 
+# to ensure data persistence on platforms like Render/Vercel.
 
 async def save_research(user_id: str, query: str, format_type: str, result: str, download_url: str = None):
-    """Asynchronously save a research result to the local SQLite DB."""
-    def _insert():
-        with _get_conn() as conn:
-            conn.execute(
-                """INSERT INTO research_history (user_id, query, format, result, download_url, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, query, format_type, result, download_url, datetime.utcnow().isoformat())
-            )
-            conn.commit()
-    await asyncio.to_thread(_insert)
+    """Saves a research result to the Supabase 'research_history' table."""
+    try:
+        def _insert():
+            sb = get_supabase_client()
+            sb.table("research_history").insert({
+                "user_id": user_id,
+                "query": query,
+                "format": format_type,
+                "result": result,
+                "download_url": download_url,
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+        
+        await asyncio.to_thread(_insert)
+    except Exception as e:
+        print(f"⚠️ Failed to save history to Supabase: {e}")
 
 async def get_history(user_id: str, limit: int = 20) -> list[dict]:
-    """Fetch recent research history for a user from SQLite."""
-    def _fetch():
-        with _get_conn() as conn:
-            rows = conn.execute(
-                """SELECT id, query, format, result, download_url, created_at
-                   FROM research_history
-                   WHERE user_id = ?
-                   ORDER BY created_at DESC LIMIT ?""",
-                (user_id, limit)
-            ).fetchall()
-        return [dict(r) for r in rows]
-    return await asyncio.to_thread(_fetch)
+    """Fetch recent research history for a user from Supabase."""
+    try:
+        def _fetch():
+            sb = get_supabase_client()
+            response = sb.table("research_history") \
+                .select("*") \
+                .eq("user_id", user_id) \
+                .order("created_at", desc=True) \
+                .limit(limit) \
+                .execute()
+            return response.data or []
+        
+        return await asyncio.to_thread(_fetch)
+    except Exception as e:
+        print(f"⚠️ Failed to fetch history from Supabase: {e}")
+        return []
 
 async def delete_history_item(item_id: int, user_id: str):
-    """Delete a specific history item (user-scoped for security)."""
-    def _delete():
-        with _get_conn() as conn:
-            conn.execute(
-                "DELETE FROM research_history WHERE id = ? AND user_id = ?",
-                (item_id, user_id)
-            )
-            conn.commit()
-    await asyncio.to_thread(_delete)
+    """Delete a specific history item from Supabase."""
+    try:
+        def _delete():
+            sb = get_supabase_client()
+            sb.table("research_history") \
+                .delete() \
+                .eq("id", item_id) \
+                .eq("user_id", user_id) \
+                .execute()
+        
+        await asyncio.to_thread(_delete)
+    except Exception as e:
+        print(f"⚠️ Failed to delete history from Supabase: {e}")

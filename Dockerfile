@@ -16,6 +16,7 @@ COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 # Pre-download HuggingFace models at build time so cold starts are instant
@@ -31,4 +32,5 @@ EXPOSE 8000
 
 # Start the FastAPI server with uvicorn
 # We use a shell-form CMD to allow environment variable expansion (like $PORT)
-CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2"]
+# Reduced workers to 1 to stay within Render's memory limits
+CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
